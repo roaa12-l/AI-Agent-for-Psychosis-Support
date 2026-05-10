@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "google-calendar": {
+      "command": "npx",
+      "args": ["-y", "@cocal/google-calendar-mcp@latest"],
+      "env": {
+        "GOOGLE_OAUTH_CREDENTIALS": "/Users/yeongjila/.anchor/google-credentials.json"
+      }
+    }
+  }
+}
