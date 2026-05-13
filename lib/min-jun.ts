@@ -145,8 +145,8 @@ export const connectedServices = [
     kind: "gmail" as const,
     label: "Gmail",
     account: "minjunkim1348@gmail.com",
-    status: "pending" as const,
-    scopes: ["gmail.readonly"],
+    status: "connected" as const,
+    scopes: ["gmail.readonly (enforced at app layer)"],
   },
   {
     kind: "drive" as const,

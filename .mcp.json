@@ -6,6 +6,13 @@
       "env": {
         "GOOGLE_OAUTH_CREDENTIALS": "/Users/yeongjila/.anchor/google-credentials.json"
       }
+    },
+    "gmail": {
+      "command": "npx",
+      "args": ["-y", "@gongrzhe/server-gmail-autoauth-mcp"],
+      "env": {
+        "GMAIL_OAUTH_PATH": "/Users/yeongjila/.anchor/google-credentials.json"
+      }
     }
   }
 }
