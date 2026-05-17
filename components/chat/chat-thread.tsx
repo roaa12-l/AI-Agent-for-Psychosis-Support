@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import type {
   ChatTurn,
   VerificationCardData,
@@ -43,6 +43,15 @@ export function ChatThread({ initial }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [escalated, setEscalated] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
+  // Stable sessionId for this page load — groups all turns into one
+  // episode on the server. Refresh the page = new session = new episode.
+  const sessionId = useMemo(
+    () =>
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `sess_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`,
+    []
+  );
 
   // Autoscroll to bottom whenever turns change.
   useEffect(() => {
@@ -75,7 +84,7 @@ export function ChatThread({ initial }: Props) {
       })
     );
 
-    const body: RespondRequest = { message: text, history };
+    const body: RespondRequest = { message: text, history, sessionId };
 
     try {
       const res = await fetch("/api/respond", {

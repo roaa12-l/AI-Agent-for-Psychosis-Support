@@ -1,28 +1,31 @@
-import { connectedServices } from "@/lib/min-jun";
+import {
+  getConnectedServices,
+  type ConnectedService,
+} from "@/lib/services";
 
-const statusStyles = {
-  connected: {
-    pill: "bg-sage-soft text-sage",
-    label: "Connected",
-  },
-  pending: {
-    pill: "bg-amber-soft text-amber",
-    label: "Not yet connected",
-  },
-  error: {
-    pill: "bg-rose-soft text-rose",
-    label: "Reconnect needed",
-  },
-} as const;
+// Service status is computed from env vars + on-disk tokens —
+// always reflect the current configuration.
+export const dynamic = "force-dynamic";
 
-const kindEmoji: Record<(typeof connectedServices)[number]["kind"], string> = {
+const statusStyles: Record<
+  ConnectedService["status"],
+  { pill: string; label: string }
+> = {
+  connected: { pill: "bg-sage-soft text-sage", label: "Connected" },
+  pending: { pill: "bg-amber-soft text-amber", label: "Not yet connected" },
+  error: { pill: "bg-rose-soft text-rose", label: "Reconnect needed" },
+};
+
+const kindEmoji: Record<ConnectedService["kind"], string> = {
   calendar: "📅",
   gmail: "📧",
   drive: "📁",
   slack: "💬",
 };
 
-export default function PatientServicesPage() {
+export default async function PatientServicesPage() {
+  const services = await getConnectedServices();
+
   return (
     <div className="flex-1 overflow-y-auto px-4 py-5">
       <header className="mb-5">
@@ -37,7 +40,7 @@ export default function PatientServicesPage() {
       </header>
 
       <ul className="space-y-3">
-        {connectedServices.map((s) => {
+        {services.map((s) => {
           const style = statusStyles[s.status];
           return (
             <li
@@ -61,7 +64,10 @@ export default function PatientServicesPage() {
                 <div className="text-[12px] text-muted truncate">
                   {s.account}
                 </div>
-                <div className="text-[11.5px] text-ink-soft mt-1.5">
+                <p className="text-[11.5px] text-ink-soft mt-1 leading-relaxed">
+                  {s.detail}
+                </p>
+                <div className="text-[11.5px] text-ink-soft mt-2">
                   Scopes:{" "}
                   {s.scopes.map((sc) => (
                     <span
@@ -81,7 +87,9 @@ export default function PatientServicesPage() {
       <div className="mt-5 bg-accent-soft border border-accent/20 rounded-xl p-4 text-[12.5px] text-ink-soft leading-relaxed">
         <span className="font-semibold text-accent">Anchor never writes.</span>{" "}
         Calendar events are only read, never modified. Emails are only
-        scanned for verification — never sent on your behalf.
+        scanned for verification — never sent on your behalf. Slack
+        permissions are scoped to a single private channel for your care
+        team.
       </div>
     </div>
   );

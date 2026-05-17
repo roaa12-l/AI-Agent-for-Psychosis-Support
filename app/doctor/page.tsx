@@ -1,5 +1,6 @@
 import Link from "next/link";
-import { minJun, recentEpisodes } from "@/lib/min-jun";
+import { minJun } from "@/lib/min-jun";
+import { readAllEpisodes } from "@/lib/episodes";
 import { getRecentEscalations, type RecentEscalation } from "@/lib/slack";
 
 // Always re-fetch from Slack on every render — escalations are
@@ -32,7 +33,8 @@ function fmtRelative(iso: string): string {
 }
 
 export default async function DoctorOverviewPage() {
-  const thisWeek = recentEpisodes.filter((e) => isThisWeek(e.at));
+  const allEpisodes = await readAllEpisodes();
+  const thisWeek = allEpisodes.filter((e) => isThisWeek(e.startedAt));
   const escalations = await getRecentEscalations(5);
   const status =
     escalations.length > 0 &&
@@ -40,6 +42,7 @@ export default async function DoctorOverviewPage() {
       24 * 60 * 60 * 1000
       ? "active"
       : "stable";
+  const mostRecent = allEpisodes[0];
 
   return (
     <div className="max-w-[1080px] px-10 py-10">
@@ -107,7 +110,9 @@ export default async function DoctorOverviewPage() {
               Most recent episode
             </div>
             <div className="text-[15px] font-semibold text-ink">
-              {recentEpisodes[0]?.theme} · {recentEpisodes[0]?.severity}
+              {mostRecent
+                ? `${mostRecent.theme} · ${mostRecent.severity}`
+                : "No episodes logged yet"}
             </div>
           </div>
           <Link
@@ -118,7 +123,8 @@ export default async function DoctorOverviewPage() {
           </Link>
         </div>
         <p className="text-[13.5px] text-ink-soft leading-relaxed">
-          {recentEpisodes[0]?.outcome}
+          {mostRecent?.outcome ??
+            "Patient hasn't started a conversation with Anchor yet this period."}
         </p>
       </div>
 

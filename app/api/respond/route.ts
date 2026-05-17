@@ -30,6 +30,7 @@ import {
 } from "@/lib/anchor-prompt";
 import { minJun } from "@/lib/min-jun";
 import { postCrisisEscalation } from "@/lib/slack";
+import { recordTurn } from "@/lib/episodes";
 
 export const runtime = "nodejs";
 
@@ -40,6 +41,12 @@ const MODEL = "claude-opus-4-7";
 export type RespondRequest = {
   message: string;
   history: Array<{ role: "user" | "assistant"; text: string }>;
+  /**
+   * Stable per-conversation ID generated client-side. Used to group
+   * multiple turns into one episode in the doctor surfaces. Optional
+   * for back-compat with old clients; required for episode logging.
+   */
+  sessionId?: string;
 };
 
 export type ToolCallTrace = {
@@ -75,6 +82,8 @@ export async function POST(req: Request) {
     );
   }
 
+  const turnStartedAt = new Date().toISOString();
+
   // ───── Crisis shortcircuit (fast path — keyword match) ─────
   if (detectCrisis(body.message)) {
     const slackResult = await postCrisisEscalation({
@@ -89,11 +98,22 @@ export async function POST(req: Request) {
       );
     }
 
+    const safetyMessage = buildSafetyMessage({
+      patientName: minJun.name,
+      psychiatrist: minJun.careTeam.psychiatrist,
+    });
+
+    await logTurnSafely({
+      sessionId: body.sessionId,
+      userMessage: body.message,
+      aiMessage: safetyMessage,
+      toolCallsCount: 0,
+      escalated: true,
+      startedAt: turnStartedAt,
+    });
+
     const payload: RespondResponse = {
-      message: buildSafetyMessage({
-        patientName: minJun.name,
-        psychiatrist: minJun.careTeam.psychiatrist,
-      }),
+      message: safetyMessage,
       toolCalls: [],
       iterations: 0,
       shouldEscalate: true,
@@ -267,6 +287,15 @@ export async function POST(req: Request) {
     }
   }
 
+  await logTurnSafely({
+    sessionId: body.sessionId,
+    userMessage: body.message,
+    aiMessage: finalText,
+    toolCallsCount: toolCalls.length,
+    escalated: claudeSelfEscalated,
+    startedAt: turnStartedAt,
+  });
+
   const payload: RespondResponse = {
     message: finalText,
     toolCalls,
@@ -274,4 +303,34 @@ export async function POST(req: Request) {
     shouldEscalate: claudeSelfEscalated,
   };
   return NextResponse.json(payload);
+}
+
+/**
+ * Episode logging is best-effort. A disk-write failure must never
+ * prevent the patient from getting their response.
+ */
+async function logTurnSafely(args: {
+  sessionId: string | undefined;
+  userMessage: string;
+  aiMessage: string;
+  toolCallsCount: number;
+  escalated: boolean;
+  startedAt: string;
+}): Promise<void> {
+  if (!args.sessionId) return;
+  try {
+    await recordTurn({
+      sessionId: args.sessionId,
+      userMessage: args.userMessage,
+      aiMessage: args.aiMessage,
+      toolCallsCount: args.toolCallsCount,
+      escalated: args.escalated,
+      startedAt: args.startedAt,
+    });
+  } catch (err) {
+    console.error(
+      "Episode logging failed (response already returned to patient):",
+      err instanceof Error ? err.message : err
+    );
+  }
 }

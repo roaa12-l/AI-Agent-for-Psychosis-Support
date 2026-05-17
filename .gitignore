@@ -39,3 +39,6 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# anchor episode store — runtime-mutated; seed lives at data/episodes.seed.json
+/data/episodes.json

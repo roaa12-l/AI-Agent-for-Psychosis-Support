@@ -1,4 +1,5 @@
-import { minJun, recentEpisodes } from "@/lib/min-jun";
+import { minJun } from "@/lib/min-jun";
+import { readAllEpisodes } from "@/lib/episodes";
 import { getRecentEscalations, type RecentEscalation } from "@/lib/slack";
 
 // Crisis escalations are time-sensitive — never serve a stale cache.
@@ -52,7 +53,11 @@ export default async function AlertsPage(
     (e) => Date.now() - new Date(e.postedAt).getTime() < 24 * 60 * 60 * 1000
   );
 
-  const infoAlerts = recentEpisodes.slice(0, 3);
+  // Info tier = non-crisis episodes from the local store. Newest 5.
+  const allEpisodes = await readAllEpisodes();
+  const infoAlerts = allEpisodes
+    .filter((e) => !e.escalated && e.severity !== "crisis")
+    .slice(0, 5);
 
   return (
     <div className="max-w-[1080px] px-10 py-10">
@@ -113,31 +118,39 @@ export default async function AlertsPage(
       <div className="text-[11px] tracking-[0.14em] uppercase text-muted font-semibold mb-3">
         Recent informational alerts
       </div>
-      <ul className="space-y-3">
-        {infoAlerts.map((ep) => (
-          <li
-            key={ep.id}
-            className="bg-card border border-line border-l-4 border-l-accent rounded-xl p-4"
-          >
-            <div className="flex items-start justify-between gap-3 mb-1">
-              <div>
-                <div className="text-[13.5px] font-semibold text-ink">
-                  Episode logged: {ep.theme}
+      {infoAlerts.length === 0 ? (
+        <div className="bg-card border border-dashed border-line rounded-xl p-6 text-center text-[12.5px] text-muted leading-relaxed">
+          No informational episodes logged yet. Resolved-without-escalation
+          conversations will appear here.
+        </div>
+      ) : (
+        <ul className="space-y-3">
+          {infoAlerts.map((ep) => (
+            <li
+              key={ep.id}
+              className="bg-card border border-line border-l-4 border-l-accent rounded-xl p-4"
+            >
+              <div className="flex items-start justify-between gap-3 mb-1">
+                <div>
+                  <div className="text-[13.5px] font-semibold text-ink">
+                    Episode logged: {ep.theme}
+                  </div>
+                  <div className="text-[11.5px] text-muted">
+                    {fmtAbsolute(ep.startedAt)} · {ep.durationMin}m ·{" "}
+                    {ep.aiTurns} turns
+                  </div>
                 </div>
-                <div className="text-[11.5px] text-muted">
-                  {fmtAbsolute(ep.at)}
-                </div>
+                <span className="bg-accent-soft text-accent text-[10.5px] font-bold tracking-wider uppercase px-2 py-0.5 rounded-full shrink-0">
+                  Info
+                </span>
               </div>
-              <span className="bg-accent-soft text-accent text-[10.5px] font-bold tracking-wider uppercase px-2 py-0.5 rounded-full shrink-0">
-                Info
-              </span>
-            </div>
-            <p className="text-[12.5px] text-ink-soft mt-1.5 leading-relaxed">
-              {ep.outcome}
-            </p>
-          </li>
-        ))}
-      </ul>
+              <p className="text-[12.5px] text-ink-soft mt-1.5 leading-relaxed">
+                {ep.outcome}
+              </p>
+            </li>
+          ))}
+        </ul>
+      )}
     </div>
   );
 }
