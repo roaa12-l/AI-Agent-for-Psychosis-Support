@@ -1,4 +1,39 @@
 import { minJun, recentEpisodes } from "@/lib/min-jun";
+import { getRecentEscalations, type RecentEscalation } from "@/lib/slack";
+
+// Crisis escalations are time-sensitive — never serve a stale cache.
+export const dynamic = "force-dynamic";
+
+function stripSlackMarkup(text: string): string {
+  return text
+    .replace(/:rotating_light:/g, "🚨")
+    .replace(/\*(.+?)\*/g, "$1")
+    .replace(/^>\s?/gm, "");
+}
+
+function fmtRelative(iso: string): string {
+  const diffMs = Date.now() - new Date(iso).getTime();
+  const m = Math.round(diffMs / 60000);
+  if (m < 1) return "just now";
+  if (m < 60) return `${m}m ago`;
+  const h = Math.round(m / 60);
+  if (h < 24) return `${h}h ago`;
+  const d = Math.round(h / 24);
+  return `${d}d ago`;
+}
+
+function fmtAbsolute(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return new Intl.DateTimeFormat("en-US", {
+    weekday: "short",
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+  }).format(d);
+}
 
 export default async function AlertsPage(
   props: PageProps<"/doctor/patient/[id]/alerts">
@@ -8,9 +43,15 @@ export default async function AlertsPage(
     return <div className="p-10 text-ink-soft">Patient {id} not found.</div>;
   }
 
-  // Map episodes to alert cards. None are crisis-level — this is the
-  // "no active alerts" path. Milestone 6 (Slack MCP) sends real
-  // crisis-tier alerts here.
+  // Pull live crisis escalations from the #min-jun-care Slack channel.
+  // Each post is an Anchor-generated escalation from the patient runtime.
+  const escalations = await getRecentEscalations(20);
+
+  // Last 24h crisis count drives the hero banner color/state.
+  const activeCrisis = escalations.filter(
+    (e) => Date.now() - new Date(e.postedAt).getTime() < 24 * 60 * 60 * 1000
+  );
+
   const infoAlerts = recentEpisodes.slice(0, 3);
 
   return (
@@ -22,16 +63,53 @@ export default async function AlertsPage(
         {minJun.name} — alert center
       </h1>
 
-      <div className="bg-sage-soft border border-sage/30 rounded-2xl p-5 mb-6 flex items-center gap-3">
-        <span className="w-2 h-2 rounded-full bg-sage" />
-        <div className="text-[14px] text-ink">
-          <strong>No active crisis alerts.</strong>{" "}
-          <span className="text-ink-soft">
-            All recent episodes were resolved without escalation.
-          </span>
+      {activeCrisis.length > 0 ? (
+        <div className="bg-rose-soft border border-rose/40 rounded-2xl p-5 mb-6 flex items-start gap-3">
+          <span className="w-2 h-2 rounded-full bg-rose mt-2 shrink-0 animate-pulse" />
+          <div className="text-[14px] text-ink">
+            <strong className="text-rose">
+              {activeCrisis.length} active crisis alert
+              {activeCrisis.length === 1 ? "" : "s"}.
+            </strong>{" "}
+            <span className="text-ink-soft">
+              In the last 24 hours. Each was posted to{" "}
+              <code className="font-mono text-[12px] bg-bg px-1.5 py-0.5 rounded">
+                #min-jun-care
+              </code>{" "}
+              for clinician acknowledgement.
+            </span>
+          </div>
         </div>
-      </div>
+      ) : (
+        <div className="bg-sage-soft border border-sage/30 rounded-2xl p-5 mb-6 flex items-center gap-3">
+          <span className="w-2 h-2 rounded-full bg-sage" />
+          <div className="text-[14px] text-ink">
+            <strong>No active crisis alerts.</strong>{" "}
+            <span className="text-ink-soft">
+              All recent episodes were resolved without escalation.
+            </span>
+          </div>
+        </div>
+      )}
 
+      {/* Crisis-tier alerts — from Slack */}
+      {escalations.length > 0 ? (
+        <>
+          <div className="text-[11px] tracking-[0.14em] uppercase text-muted font-semibold mb-3 flex items-center justify-between">
+            <span>Crisis escalations · live</span>
+            <span className="text-[10px] tracking-wider text-muted">
+              from #min-jun-care via Slack MCP
+            </span>
+          </div>
+          <ul className="space-y-3 mb-8">
+            {escalations.map((e) => (
+              <CrisisAlertCard key={e.ts} escalation={e} />
+            ))}
+          </ul>
+        </>
+      ) : null}
+
+      {/* Informational tier — local episode log */}
       <div className="text-[11px] tracking-[0.14em] uppercase text-muted font-semibold mb-3">
         Recent informational alerts
       </div>
@@ -47,14 +125,7 @@ export default async function AlertsPage(
                   Episode logged: {ep.theme}
                 </div>
                 <div className="text-[11.5px] text-muted">
-                  {new Intl.DateTimeFormat("en-US", {
-                    weekday: "short",
-                    month: "short",
-                    day: "numeric",
-                    hour: "numeric",
-                    minute: "2-digit",
-                    hour12: true,
-                  }).format(new Date(ep.at))}
+                  {fmtAbsolute(ep.at)}
                 </div>
               </div>
               <span className="bg-accent-soft text-accent text-[10.5px] font-bold tracking-wider uppercase px-2 py-0.5 rounded-full shrink-0">
@@ -67,16 +138,32 @@ export default async function AlertsPage(
           </li>
         ))}
       </ul>
-
-      <div className="mt-8 bg-card border border-dashed border-line rounded-2xl p-6 text-center">
-        <div className="text-[12.5px] text-muted leading-relaxed">
-          Crisis-tier alerts arrive in real time and are also posted to{" "}
-          <code className="font-mono text-ink bg-bg px-1.5 py-0.5 rounded">
-            #min-jun-care
-          </code>{" "}
-          on Slack. Milestone 6 wires the Slack MCP.
-        </div>
-      </div>
     </div>
+  );
+}
+
+function CrisisAlertCard({ escalation }: { escalation: RecentEscalation }) {
+  const cleaned = stripSlackMarkup(escalation.text);
+  return (
+    <li className="bg-card border border-line border-l-4 border-l-rose rounded-xl p-4">
+      <div className="flex items-start justify-between gap-3 mb-2">
+        <div>
+          <div className="text-[13.5px] font-semibold text-ink flex items-center gap-2">
+            <span className="text-rose">🚨</span>
+            <span>Crisis escalation</span>
+          </div>
+          <div className="text-[11.5px] text-muted mt-0.5">
+            {fmtRelative(escalation.postedAt)} ·{" "}
+            {fmtAbsolute(escalation.postedAt)}
+          </div>
+        </div>
+        <span className="bg-rose-soft text-rose text-[10.5px] font-bold tracking-wider uppercase px-2 py-0.5 rounded-full shrink-0">
+          Crisis
+        </span>
+      </div>
+      <pre className="text-[12.5px] text-ink-soft leading-relaxed whitespace-pre-wrap font-sans mt-2">
+        {cleaned}
+      </pre>
+    </li>
   );
 }
