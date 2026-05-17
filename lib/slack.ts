@@ -176,11 +176,30 @@ export async function getRecentEscalations(
     }
 
     const messages = (
-      parsed as { messages: Array<{ ts?: string; text?: string }> }
+      parsed as {
+        messages: Array<{
+          ts?: string;
+          text?: string;
+          subtype?: string;
+        }>;
+      }
     ).messages;
 
+    // Only return messages that match our escalation signature.
+    // The channel also contains Slack system messages (channel_join,
+    // app_added, etc.) and may eventually contain clinician replies
+    // — neither of those are escalations from Anchor.
     return messages
-      .filter((m) => typeof m.ts === "string" && typeof m.text === "string")
+      .filter(
+        (m) =>
+          typeof m.ts === "string" &&
+          typeof m.text === "string" &&
+          // Drop system messages (channel_join, channel_leave, etc.)
+          !m.subtype &&
+          // Match our buildEscalationMessage() signature
+          (m.text.startsWith(":rotating_light:") ||
+            m.text.includes("Crisis escalation"))
+      )
       .map<RecentEscalation>((m) => ({
         ts: m.ts!,
         postedAt: new Date(parseFloat(m.ts!) * 1000).toISOString(),
