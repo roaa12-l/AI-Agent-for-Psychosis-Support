@@ -24,6 +24,7 @@ import {
 } from "@/lib/mcp-client";
 import { buildSystemPrompt, detectCrisis } from "@/lib/anchor-prompt";
 import { minJun } from "@/lib/min-jun";
+import { postCrisisEscalation } from "@/lib/slack";
 
 export const runtime = "nodejs";
 
@@ -71,6 +72,22 @@ export async function POST(req: Request) {
 
   // ───── Crisis shortcircuit ─────
   if (detectCrisis(body.message)) {
+    // Post to Slack BEFORE returning. Awaited so we know the
+    // clinician was notified before the patient sees the banner.
+    // postCrisisEscalation() is best-effort internally — failures
+    // log but don't throw — so this never blocks the safety response.
+    const slackResult = await postCrisisEscalation({
+      patientName: minJun.name,
+      patientNameKo: minJun.nameKo,
+      triggerMessage: body.message,
+      recentTurns: body.history.slice(-3),
+    });
+    if (!slackResult.ok) {
+      console.warn(
+        `Crisis escalation Slack post failed (still returning safety message to patient): ${slackResult.error}`
+      );
+    }
+
     const payload: RespondResponse = {
       message: `${minJun.name}, what you just said matters. I'm reaching ${minJun.careTeam.psychiatrist} right now. Stay with me.`,
       toolCalls: [],
@@ -94,7 +111,7 @@ export async function POST(req: Request) {
   const mcp = getMcpClient();
   let claudeTools;
   try {
-    const mcpTools = await mcp.listTools();
+    const mcpTools = await mcp.listToolsForClaude();
     claudeTools = toolDefinitionsForClaude(mcpTools);
   } catch (err) {
     console.error("MCP listTools failed:", err);

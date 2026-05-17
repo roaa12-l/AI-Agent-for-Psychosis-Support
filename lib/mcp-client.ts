@@ -1,28 +1,30 @@
 /**
  * Runtime MCP client — spawns one stdio subprocess per upstream MCP
  * server, merges their tool catalogs, and routes tool calls back to
- * the right server. Used by `/api/respond`.
+ * the right server. Used by `/api/respond` and by server-side
+ * helpers (e.g. lib/slack.ts).
  *
  * Architecture:
  *   Next.js API route
  *     → AnchorMcpClient (this file)
  *         ├── google-calendar     (subprocess: @cocal/google-calendar-mcp)
- *         └── gmail               (subprocess: @gongrzhe/server-gmail-autoauth-mcp)
+ *         ├── gmail               (subprocess: @gongrzhe/server-gmail-autoauth-mcp)
+ *         └── slack               (subprocess: @modelcontextprotocol/server-slack)
  *
- * Both subprocesses reuse the OAuth tokens cached by Claude Code's
- * one-time auth handshakes (separate token caches per server).
+ * SECURITY MODEL — two distinct allowlists.
  *
- * SECURITY NOTE — defense in depth.
- * The Gmail MCP we use requests broader OAuth scopes than we need
- * (gmail.modify / gmail.settings.basic, not just gmail.readonly).
- * The off-the-shelf MCP exposes ~20 tools including send, draft,
- * delete, and label manipulation. Anchor's safety boundary is the
- * READ_ONLY_TOOLS allowlist below: tools not on this list are
- * filtered out before they ever reach Claude. Claude literally
- * cannot ask to send an email because it cannot see the tool. In
- * production, we would also reduce the OAuth grant by maintaining a
- * forked Gmail MCP that requests gmail.readonly only — but the
- * application-layer filter is the actual security control.
+ * `CLAUDE_ALLOWED_TOOLS` is the read-only subset of tools that Anchor
+ * exposes to the Claude model via `listToolsForClaude()`. Tools not
+ * on this list are NEVER seen by the model — it can't reference what
+ * it can't see. This means the patient-facing AI is structurally
+ * incapable of asking to send email or post to Slack.
+ *
+ * `SERVER_ALLOWED_TOOLS` is the wider set the trusted server-side
+ * code is permitted to call directly via `callTool()`. It is a
+ * superset of `CLAUDE_ALLOWED_TOOLS` plus the action-oriented tools
+ * we need for clinician handoff (slack_post_message,
+ * slack_get_channel_history). Server code authors this list
+ * explicitly; nothing outside it ever runs.
  *
  * Singleton via globalThis so Next.js HMR doesn't spawn fresh
  * subprocesses on every save during dev.
@@ -33,12 +35,10 @@ import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js"
 import type Anthropic from "@anthropic-ai/sdk";
 
 /**
- * Read-only allowlist — the ONLY tools Anchor will ever expose to Claude.
- * Adding a new MCP server means adding its read tools here. Any tool not
- * on this list is filtered out of the listTools response, so the model
- * can't request it even by name.
+ * Tools the Claude model is allowed to see and call.
+ * Strictly read-only across every MCP server.
  */
-const READ_ONLY_TOOLS = new Set([
+const CLAUDE_ALLOWED_TOOLS = new Set([
   // Google Calendar (@cocal/google-calendar-mcp)
   "list-events",
   "search-events",
@@ -54,8 +54,20 @@ const READ_ONLY_TOOLS = new Set([
   "list_email_labels",
 ]);
 
+/**
+ * Tools the trusted server side (route handlers, lib/slack.ts) may
+ * call directly. Superset of CLAUDE_ALLOWED_TOOLS plus actions
+ * required for clinician handoff and dashboards.
+ */
+const SERVER_ALLOWED_TOOLS = new Set([
+  ...CLAUDE_ALLOWED_TOOLS,
+  // Slack — server-only. The patient-facing model never sees these.
+  "slack_post_message",
+  "slack_get_channel_history",
+  "slack_list_channels",
+]);
+
 export type McpTool = {
-  /** Server-qualified name as exposed to Claude */
   name: string;
   description?: string;
   inputSchema: Record<string, unknown>;
@@ -68,7 +80,12 @@ type ServerSpec = {
   env: Record<string, string>;
 };
 
-/** Read each server's config from the project's `.mcp.json`. */
+/**
+ * Build the set of MCP subprocesses to spawn. Slack is conditional:
+ * if SLACK_BOT_TOKEN isn't set we skip it (the app still works —
+ * Calendar + Gmail verification keeps running; only escalation is
+ * silently no-op'd).
+ */
 function buildServerSpecs(): ServerSpec[] {
   const credsPath = process.env.GOOGLE_OAUTH_CREDENTIALS;
   if (!credsPath) {
@@ -76,7 +93,8 @@ function buildServerSpecs(): ServerSpec[] {
       "GOOGLE_OAUTH_CREDENTIALS env var is not set. Add it to .env.local."
     );
   }
-  return [
+
+  const specs: ServerSpec[] = [
     {
       name: "google-calendar",
       command: "npx",
@@ -90,6 +108,27 @@ function buildServerSpecs(): ServerSpec[] {
       env: { GMAIL_OAUTH_PATH: credsPath },
     },
   ];
+
+  const slackBotToken = process.env.SLACK_BOT_TOKEN;
+  const slackTeamId = process.env.SLACK_TEAM_ID;
+  if (slackBotToken && slackTeamId) {
+    specs.push({
+      name: "slack",
+      command: "npx",
+      args: ["-y", "@modelcontextprotocol/server-slack"],
+      env: {
+        SLACK_BOT_TOKEN: slackBotToken,
+        SLACK_TEAM_ID: slackTeamId,
+      },
+    });
+  } else {
+    console.warn(
+      "Slack MCP not spawned — SLACK_BOT_TOKEN or SLACK_TEAM_ID missing. " +
+        "Clinician escalation will no-op."
+    );
+  }
+
+  return specs;
 }
 
 class ServerHandle {
@@ -133,8 +172,9 @@ class ServerHandle {
 
 class AnchorMcpClient {
   private servers: Map<string, ServerHandle>;
-  /** Tool name → which server owns it. Populated by listTools(). */
+  /** Tool name → server that owns it. Populated lazily on first listTools(). */
   private toolOwners: Map<string, string> = new Map();
+  private ownersReady: Promise<void> | null = null;
 
   constructor() {
     this.servers = new Map();
@@ -144,30 +184,46 @@ class AnchorMcpClient {
   }
 
   /**
-   * Merged read-only tool catalog across every connected MCP. If one
-   * server is unreachable we log and continue with whatever IS reachable —
-   * a missing Gmail token shouldn't take Calendar verification down too.
+   * Walk every server's catalog to populate toolOwners. Must run
+   * before callTool() can dispatch by name; listToolsForClaude()
+   * does this implicitly. Server-only callers should hit
+   * ensureOwners() first.
    */
-  async listTools(): Promise<McpTool[]> {
-    const merged: McpTool[] = [];
-    this.toolOwners.clear();
+  private async ensureOwners(): Promise<void> {
+    if (this.ownersReady) return this.ownersReady;
+    this.ownersReady = (async () => {
+      for (const [serverName, handle] of this.servers) {
+        try {
+          const client = await handle.getClient();
+          const { tools } = await client.listTools();
+          for (const t of tools) {
+            if (this.toolOwners.has(t.name)) continue;
+            this.toolOwners.set(t.name, serverName);
+          }
+        } catch (err) {
+          console.error(
+            `Failed to load tool catalog from MCP "${serverName}":`,
+            err instanceof Error ? err.message : err
+          );
+        }
+      }
+    })();
+    return this.ownersReady;
+  }
 
+  /**
+   * Tool catalog filtered to what Claude is allowed to see.
+   * Patient-facing model never sees write tools or Slack tools.
+   */
+  async listToolsForClaude(): Promise<McpTool[]> {
+    await this.ensureOwners();
+    const merged: McpTool[] = [];
     for (const [serverName, handle] of this.servers) {
       try {
         const client = await handle.getClient();
         const { tools } = await client.listTools();
         for (const t of tools) {
-          if (!READ_ONLY_TOOLS.has(t.name)) continue;
-          if (this.toolOwners.has(t.name)) {
-            // Name collision between servers — keep the first wins, log.
-            console.warn(
-              `MCP tool name collision: "${t.name}" exists on both ` +
-                `${this.toolOwners.get(t.name)} and ${serverName}. ` +
-                `Keeping the first.`
-            );
-            continue;
-          }
-          this.toolOwners.set(t.name, serverName);
+          if (!CLAUDE_ALLOWED_TOOLS.has(t.name)) continue;
           merged.push({
             name: t.name,
             description: t.description,
@@ -185,23 +241,25 @@ class AnchorMcpClient {
   }
 
   /**
-   * Route a tool call to its owning MCP server. Throws if the tool is
-   * unknown, on the writable-blocklist, or if the owning server fails.
+   * Dispatch a tool call by name to its owning MCP server.
+   * Refuses anything not on SERVER_ALLOWED_TOOLS, so even buggy
+   * server code can't run an arbitrary MCP tool.
    */
   async callTool(
     name: string,
     args: Record<string, unknown>
   ): Promise<string> {
-    if (!READ_ONLY_TOOLS.has(name)) {
+    if (!SERVER_ALLOWED_TOOLS.has(name)) {
       throw new Error(
-        `Tool "${name}" is not on the read-only allowlist. Refusing.`
+        `Tool "${name}" is not on the server allowlist. Refusing.`
       );
     }
+    await this.ensureOwners();
     const ownerName = this.toolOwners.get(name);
     if (!ownerName) {
       throw new Error(
-        `Tool "${name}" was requested before listTools() registered an owner. ` +
-          `Did the upstream MCP server crash?`
+        `Tool "${name}" has no registered owner. Either it doesn't exist ` +
+          `on any connected MCP, or that MCP failed to start.`
       );
     }
     const handle = this.servers.get(ownerName);
