@@ -22,7 +22,12 @@ import {
   getMcpClient,
   toolDefinitionsForClaude,
 } from "@/lib/mcp-client";
-import { buildSystemPrompt, detectCrisis } from "@/lib/anchor-prompt";
+import {
+  buildSafetyMessage,
+  buildSystemPrompt,
+  detectCrisis,
+  looksLikeSafetyResponse,
+} from "@/lib/anchor-prompt";
 import { minJun } from "@/lib/min-jun";
 import { postCrisisEscalation } from "@/lib/slack";
 
@@ -70,12 +75,8 @@ export async function POST(req: Request) {
     );
   }
 
-  // ───── Crisis shortcircuit ─────
+  // ───── Crisis shortcircuit (fast path — keyword match) ─────
   if (detectCrisis(body.message)) {
-    // Post to Slack BEFORE returning. Awaited so we know the
-    // clinician was notified before the patient sees the banner.
-    // postCrisisEscalation() is best-effort internally — failures
-    // log but don't throw — so this never blocks the safety response.
     const slackResult = await postCrisisEscalation({
       patientName: minJun.name,
       patientNameKo: minJun.nameKo,
@@ -84,12 +85,15 @@ export async function POST(req: Request) {
     });
     if (!slackResult.ok) {
       console.warn(
-        `Crisis escalation Slack post failed (still returning safety message to patient): ${slackResult.error}`
+        `Crisis escalation Slack post failed (still returning safety message): ${slackResult.error}`
       );
     }
 
     const payload: RespondResponse = {
-      message: `${minJun.name}, what you just said matters. I'm reaching ${minJun.careTeam.psychiatrist} right now. Stay with me.`,
+      message: buildSafetyMessage({
+        patientName: minJun.name,
+        psychiatrist: minJun.careTeam.psychiatrist,
+      }),
       toolCalls: [],
       iterations: 0,
       shouldEscalate: true,
@@ -239,11 +243,35 @@ export async function POST(req: Request) {
       "I'm here. Can you tell me a little more about what's happening right now?";
   }
 
+  // ───── Post-response crisis detection ─────
+  // The keyword shortcircuit catches obvious phrasings, but the model
+  // can self-detect a subtler crisis and emit the safety message
+  // directly per its prompt. Detect that case here and run the same
+  // escalation path the shortcircuit does. Result: no crisis can
+  // slip through to the patient without also reaching the clinician.
+  const claudeSelfEscalated = looksLikeSafetyResponse(
+    finalText,
+    minJun.careTeam.psychiatrist
+  );
+  if (claudeSelfEscalated) {
+    const slackResult = await postCrisisEscalation({
+      patientName: minJun.name,
+      patientNameKo: minJun.nameKo,
+      triggerMessage: body.message,
+      recentTurns: body.history.slice(-3),
+    });
+    if (!slackResult.ok) {
+      console.warn(
+        `Post-response crisis escalation Slack post failed (still surfacing banner): ${slackResult.error}`
+      );
+    }
+  }
+
   const payload: RespondResponse = {
     message: finalText,
     toolCalls,
     iterations,
-    shouldEscalate: false,
+    shouldEscalate: claudeSelfEscalated,
   };
   return NextResponse.json(payload);
 }

@@ -64,32 +64,89 @@ import { minJun } from "./min-jun";
 export const CRISIS_KEYWORDS = [
   // English — direct self-harm / suicide
   "kill myself",
+  "killing myself",
   "end it",
   "end my life",
   "want to die",
+  "wanna die",
+  "want to disappear",
+  "want it to end",
   "suicide",
   "suicidal",
   "hurt myself",
+  "harm myself",
   "no point",
+  "what's the point",
+  "whats the point",
+  "nothing matters",
+  "doesn't matter anymore",
+  "tired of being alive",
+  "tired of living",
   "can't go on",
+  "cant go on",
+  "can't keep going",
+  "cant keep going",
+  "can't do this anymore",
+  "cant do this anymore",
+  "i give up",
+  "give up on life",
   "going to do it",
+  "im going to do it",
   // English — harm to others
   "hurt them",
   "hurt him",
   "hurt her",
   "going to kill",
+  "going to hurt",
   // Korean
   "자살",
   "죽고 싶",
   "죽고싶",
+  "죽어버리",
   "끝내고 싶",
   "끝내버리",
   "해치고 싶",
+  "살기 싫",
+  "살기싫",
+  "의미 없",
+  "의미없",
+  "포기하고 싶",
 ];
 
 export function detectCrisis(text: string): boolean {
   const lower = text.toLowerCase();
   return CRISIS_KEYWORDS.some((kw) => lower.includes(kw.toLowerCase()));
+}
+
+/**
+ * Anchor's hardcoded safety reply for crisis. The server uses this
+ * exact string when the crisis shortcircuit fires, AND uses it as a
+ * signature to detect after-the-fact when Claude itself self-routed
+ * a subtle crisis. Both paths converge on the same Slack escalation.
+ */
+export function buildSafetyMessage(opts: {
+  patientName: string;
+  psychiatrist: string;
+}): string {
+  return `${opts.patientName}, what you just said matters. I'm reaching ${opts.psychiatrist} right now. Stay with me.`;
+}
+
+/**
+ * Detect the safety-message signature in arbitrary text. The marker
+ * "reaching <psychiatrist> right now" is specific enough that it
+ * effectively never appears in normal conversation, so we use it as
+ * a post-hoc crisis signal even when keyword detection missed the
+ * incoming message.
+ */
+export function looksLikeSafetyResponse(
+  text: string,
+  psychiatrist: string
+): boolean {
+  const lower = text.toLowerCase();
+  return (
+    lower.includes(`reaching ${psychiatrist.toLowerCase()}`) ||
+    lower.includes("what you just said matters")
+  );
 }
 
 /**
